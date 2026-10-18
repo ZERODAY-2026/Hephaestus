@@ -36,7 +36,7 @@ from extract import (
 )
 from verify import verify_facts, verify_quote
 from timeline import compute_timeline
-from explain import generate_plain_explanation, answer_followup_question
+from explain import generate_plain_explanation, answer_followup_question, extract_legal_glossary
 from escalate import build_lawyer_checklist
 from translate import translate_text, MACHINE_TRANSLATION_NOTICES
 from missing_clauses import detect_missing_clauses
@@ -389,6 +389,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Session State Initialization
+if "reset_counter" not in st.session_state:
+    st.session_state.reset_counter = 0
 if "lang" not in st.session_state:
     st.session_state.lang = "en"
 if "doc_data" not in st.session_state:
@@ -399,17 +401,29 @@ if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 if "qa_history" not in st.session_state:
     st.session_state.qa_history = []
-if "nav_page" not in st.session_state:
-    st.session_state.nav_page = "New Analysis"
 if "validation_error" not in st.session_state:
     st.session_state.validation_error = None
 if "selected_sample" not in st.session_state:
     st.session_state.selected_sample = "Select a sample notice..."
 
-def wipe_all_session():
+def execute_reset_and_start_over():
+    """
+    Bulletproof Reset: Increments reset_counter to force creation of new Streamlit
+    widget instances (clearing file_uploader & text_area buffers) and resets state.
+    """
+    next_counter = st.session_state.get("reset_counter", 0) + 1
+    current_lang = st.session_state.get("lang", "en")
     st.session_state.clear()
+    st.session_state.reset_counter = next_counter
+    st.session_state.lang = current_lang
+    st.session_state.doc_data = None
+    st.session_state.validation_error = None
+    st.session_state.qa_history = []
+    st.session_state.chat_history = []
+    st.session_state.selected_sample = "Select a sample notice..."
+    st.session_state.receipt_date = date.today()
     wipe_temp_directory()
-    st.toast("Session wiped completely. All document data erased from RAM.", icon="🧹")
+    st.rerun()
 
 # Load current config and Gemma 4 health status
 base_ollama_url = config.get("ollama", {}).get("base_url", "http://127.0.0.1:11434")
@@ -430,6 +444,36 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
+    # Language Selector
+    lang_choice = st.selectbox(
+        "🌐 Language / भाषा / భాష",
+        options=["en", "hi", "te"],
+        format_func=lambda x: {"en": "English", "hi": "हिन्दी (Hindi)", "te": "తెలుగు (Telugu)"}[x],
+        index=["en", "hi", "te"].index(st.session_state.lang),
+        key="lang_selector"
+    )
+    if lang_choice != st.session_state.lang:
+        st.session_state.lang = lang_choice
+        st.rerun()
+
+    i18n = load_i18n(st.session_state.lang)
+
+    st.markdown("---")
+
+    # Sample Legal Notice Loader in Sidebar
+    st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#94A3B8; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Sample Legal Notice Loader</p>", unsafe_allow_html=True)
+    selected_sample = st.selectbox(
+        "Load Sample Notice:",
+        options=list(SAMPLE_NOTICES.keys()),
+        index=list(SAMPLE_NOTICES.keys()).index(st.session_state.selected_sample) if st.session_state.selected_sample in SAMPLE_NOTICES else 0,
+        key=f"sidebar_sample_select_{st.session_state.reset_counter}",
+        label_visibility="collapsed"
+    )
+    if selected_sample != st.session_state.selected_sample:
+        st.session_state.selected_sample = selected_sample
+        st.session_state.validation_error = None
+        st.rerun()
+
     # Reassurance Callout Card
     st.markdown("""
     <div class="reassurance-card">
@@ -437,35 +481,6 @@ with st.sidebar:
         NoticeGuard helps you understand legal notices in simple, reassuring terms without sending any data off your machine.
     </div>
     """, unsafe_allow_html=True)
-
-    # Navigation Menu
-    st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#94A3B8; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Navigation</p>", unsafe_allow_html=True)
-    nav_choice = st.radio(
-        "Navigation",
-        options=["Home / Overview", "New Analysis", "Past Reports", "Settings"],
-        index=["Home / Overview", "New Analysis", "Past Reports", "Settings"].index(
-            st.session_state.nav_page if st.session_state.nav_page in ["Home / Overview", "New Analysis", "Past Reports", "Settings"] else "New Analysis"
-        ),
-        label_visibility="collapsed"
-    )
-    if nav_choice != st.session_state.nav_page:
-        st.session_state.nav_page = nav_choice
-        st.rerun()
-
-    st.markdown("---")
-
-    # Language Selector
-    lang_choice = st.selectbox(
-        "🌐 Language / भाषा / భాష",
-        options=["en", "hi", "te"],
-        format_func=lambda x: {"en": "English", "hi": "हिंदी (Hindi)", "te": "తెలుగు (Telugu)"}[x],
-        index=["en", "hi", "te"].index(st.session_state.lang)
-    )
-    if lang_choice != st.session_state.lang:
-        st.session_state.lang = lang_choice
-        st.rerun()
-
-    i18n = load_i18n(st.session_state.lang)
 
     # Receipt date picker for relative deadlines
     st.session_state.receipt_date = st.date_input(
@@ -484,9 +499,7 @@ with st.sidebar:
 
     st.markdown("---")
     if st.button("🔄 " + i18n.get("ui", {}).get("refresh_button", "Refresh / Start Over"), key="sidebar_refresh_btn", use_container_width=True, type="secondary"):
-        st.session_state.clear()
-        wipe_temp_directory()
-        st.rerun()
+        execute_reset_and_start_over()
 
     st.markdown("---")
     with st.expander("📚 Indian Legal Terms Guide"):
@@ -524,9 +537,7 @@ with top_col2:
         """, unsafe_allow_html=True)
 
     if st.button("🔄 " + i18n.get("ui", {}).get("refresh_button", "Refresh / Start Over"), key="top_refresh_btn", use_container_width=True, help="Reset session and start over"):
-        st.session_state.clear()
-        wipe_temp_directory()
-        st.rerun()
+        execute_reset_and_start_over()
 
 # Disconnected / Model Missing Actionable Warning Banner
 if not gemma_connected:
@@ -544,27 +555,6 @@ st.markdown(f"""
     <strong>⚖️ {i18n.get("disclaimer", "NoticeGuard provides preliminary factual extraction and informational triage only. It is NOT legal advice and does NOT determine legal validity or enforceability. Always consult a licensed advocate before acting.")}</strong>
 </div>
 """, unsafe_allow_html=True)
-
-# If Navigation is "Settings"
-if st.session_state.nav_page == "Settings":
-    st.markdown("### ⚙️ System Settings & Verification Configuration")
-    with st.container():
-        st.markdown(f"**Ollama Endpoint:** `{config.get('ollama', {}).get('base_url', 'http://127.0.0.1:11434')}`")
-        st.markdown(f"**Primary Model:** `{config.get('ollama', {}).get('model', 'gemma4:e4b')}`")
-        st.markdown(f"**Fallback Model:** `{config.get('ollama', {}).get('fallback_model', 'gemma4:2b')}`")
-        st.markdown(f"**Request Timeout:** `{config.get('ollama', {}).get('timeout_seconds', 180)} seconds`")
-        st.markdown(f"**Fuzzy Quote Threshold:** `{config.get('verifier', {}).get('fuzzy_threshold', 65.0)}%`")
-        st.markdown(f"**Air-Gapped Telemetry:** Disabled (`gatherUsageStats = false`)")
-        st.markdown(f"**Zero-Persistence RAM Processing:** Active")
-    st.stop()
-
-# If Navigation is "Past Reports"
-if st.session_state.nav_page == "Past Reports":
-    st.markdown("### 📁 Past Triage Reports")
-    st.info("🔒 **Privacy Guarantee**: NoticeGuard enforces zero-persistence privacy. Documents and analyses are retained solely in RAM during your active session and are permanently erased upon clicking 'Wipe Session' or closing the browser.")
-    if st.session_state.doc_data:
-        st.success(f"Active in-memory analysis available for document: `{len(st.session_state.doc_data.get('raw_text', ''))} characters`.")
-    st.stop()
 
 # Helper for quote verification badge
 def render_grounding_badge(item: dict) -> str:
@@ -590,31 +580,21 @@ if st.session_state.doc_data is None:
         <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 14px;">
             <div>
                 <h3 style="color: #0F172A; font-weight: 700; margin: 0 0 4px 0;">1. Upload Your Notice</h3>
-                <p style="color: #64748B; font-size: 0.9rem; margin: 0;">Upload your PDF or text file, or paste notice text directly.</p>
+                <p style="color: #64748B; font-size: 0.9rem; margin: 0;">Upload your PDF, image, or text file, or paste notice text directly.</p>
             </div>
         </div>
     """, unsafe_allow_html=True)
 
-    # Sample notice quick selector
-    selected_sample = st.selectbox(
-        "💡 Quick-Load a Sample Notice (includes valid legal notices and invalid non-legal file test):",
-        options=list(SAMPLE_NOTICES.keys()),
-        index=list(SAMPLE_NOTICES.keys()).index(st.session_state.selected_sample) if st.session_state.selected_sample in SAMPLE_NOTICES else 0
-    )
-    if selected_sample != st.session_state.selected_sample:
-        st.session_state.selected_sample = selected_sample
-        st.session_state.validation_error = None
-        st.rerun()
-
-    sample_preset = SAMPLE_NOTICES[st.session_state.selected_sample] if st.session_state.selected_sample else ""
+    sample_preset = SAMPLE_NOTICES.get(st.session_state.selected_sample, "")
 
     col_hero_input, col_hero_art = st.columns([3, 1])
 
     with col_hero_input:
-        # File Uploader
+        # File Uploader with dynamic reset key
         uploaded_file = st.file_uploader(
             "Upload Notice Document (PDF, TXT, or Image):",
             type=["pdf", "txt", "png", "jpg", "jpeg", "webp"],
+            key=f"uploader_{st.session_state.reset_counter}",
             help="Your file is parsed strictly in memory (RAM). Scanned documents are transcribed locally via Gemma 4 Vision. Never transmitted to the cloud."
         )
 
@@ -627,13 +607,14 @@ if st.session_state.doc_data is None:
         </div>
         """, unsafe_allow_html=True)
 
-        # Text Area
+        # Text Area with dynamic reset key
         pasted_text_input = st.text_area(
             "Notice Content",
             value=sample_preset,
             height=180,
             placeholder="Paste legal notice text here...",
-            label_visibility="collapsed"
+            label_visibility="collapsed",
+            key=f"textarea_{st.session_state.reset_counter}"
         )
 
     with col_hero_art:
@@ -916,6 +897,26 @@ if st.session_state.doc_data is not None:
         steps_to_show = facts.get("recommended_next_steps") or default_steps
         for step_text in steps_to_show:
             st.markdown(f"- [ ] {loc_val(step_text)}")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("---")
+
+        # PILLAR 5: HARD LEGAL WORDS EXPLAINED (PLAIN GLOSSARY)
+        gloss_title = ui_strings.get("glossary_heading", "Hard Legal Words Explained (Simple Meaning)")
+        st.markdown(f"#### 📖 5. {gloss_title}")
+        glossary_items = extract_legal_glossary(doc["raw_text"], lang=current_lang)
+        if glossary_items:
+            cards_html = "".join([
+                f"""<div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-left: 4px solid #116B4E; border-radius: 8px; padding: 12px 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+                    <div style="font-weight: 700; color: #116B4E; font-size: 0.95rem; margin-bottom: 4px;">📌 {item['term']}</div>
+                    <div style="color: #334155; font-size: 0.88rem; line-height: 1.45;">{item['meaning']}</div>
+                </div>""" for item in glossary_items
+            ])
+            st.markdown(f"""
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 10px; margin-bottom: 20px;">
+                {cards_html}
+            </div>
+            """, unsafe_allow_html=True)
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")

@@ -181,3 +181,87 @@ def get_silent_message(language: str = "en", strings_dict: Dict[str, Any] = None
     elif language == "te":
         return "నోటీసులో ఈ అంశం గురించి ప్రస్తావించబడలేదు."
     return "The notice does not address this."
+
+# Comprehensive Multilingual Legal Notice Validation Vocabulary
+LEGAL_KEYWORDS_EN = [
+    "notice", "legal", "agreement", "contract", "clause", "section", "act", "demand",
+    "hereby", "party", "tenant", "landlord", "employer", "employee", "termination",
+    "breach", "payment", "dues", "advocate", "court", "date", "days", "signed",
+    "sincerely", "regards", "subject", "ref", "reference", "dear", "sir", "madam",
+    "compliance", "penalty", "refund", "invoice", "lease", "rent", "caution",
+    "warning", "show cause", "policy", "terms", "obligation", "liability", "dispute"
+]
+
+LEGAL_KEYWORDS_HI = [
+    "नोटिस", "कानूनी", "सूचना", "समझौता", "अनुबंध", "धारा", "अधिनियम", "भुगतान",
+    "किराया", "मकान", "मालिक", "किरायेदार", "समाप्ति", "उल्लंघन", "वकील", "न्यायालय",
+    "कोर्ट", "चेतावनी", "अवधि", "दिन", "रुपए", "रुपये", "हस्ताक्षर", "महोदय", "विषय",
+    "संदर्भ", "शर्तें", "जुर्माना", "बकाया", "सेवा", "कारण बताओ", "पक्ष", "हकदार",
+    "कार्यवाही", "kanooni", "notice", "samjhauta", "kiraya", "bhugtan"
+]
+
+LEGAL_KEYWORDS_TE = [
+    "నోటీసు", "చట్టపరమైన", "ఒప్పందం", "నిబంధన", "చెల్లింపు", "అద్దె", "యజమాని",
+    "న్యాయవాది", "కోర్టు", "హెచ్చరిక", "గడువు", "సంతకం", "గౌరవనీయులైన", "విషయం",
+    "జరిమానా", "బాకీ", "నోటీస్"
+]
+
+def validate_is_legal_notice(text: str) -> Tuple[bool, str]:
+    """
+    Multilingual Pre-Triage Document Validator (EN, HI, TE).
+    Verifies that the uploaded/pasted text contains legal/formal vocabulary or
+    formal notice structural patterns before running triage.
+    Rejects trivial text (< 25 chars) or unrelated non-legal items (e.g. recipes, code).
+    Returns (is_valid, reason_or_message).
+    """
+    if not text or len(text.strip()) < 25:
+        return False, "The input document is too short (< 25 characters) to be an actionable legal notice."
+
+    lower_text = text.lower()
+    matched_markers = []
+
+    # Check English keywords
+    for kw in LEGAL_KEYWORDS_EN:
+        if re.search(r'\b' + re.escape(kw) + r'\b', lower_text):
+            matched_markers.append(kw)
+
+    # Check Hindi keywords
+    for kw in LEGAL_KEYWORDS_HI:
+        if kw in text or re.search(r'\b' + re.escape(kw) + r'\b', lower_text):
+            matched_markers.append(kw)
+
+    # Check Telugu keywords
+    for kw in LEGAL_KEYWORDS_TE:
+        if kw in text:
+            matched_markers.append(kw)
+
+    # Check structural markers (dates, currency, salutations, numbered lists)
+    structural_markers = []
+    
+    # Dates
+    if re.search(r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b', text) or re.search(r'\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{2,4}\b', lower_text):
+        structural_markers.append("date")
+
+    # Currency
+    if re.search(r'(?:₹|rs\.?|inr|\$|रुपए|रुपये|రూ\.)\s*\d+', lower_text):
+        structural_markers.append("currency")
+
+    # Formal salutations / addressees
+    if re.search(r'(?i)\b(?:dear|to,|from:|sir|madam|sirs|महोदय|గౌరవనీయులైన)\b', text):
+        structural_markers.append("salutation")
+
+    # Numbered list clauses
+    if re.search(r'(?m)^\s*(?:\d+[\.\)]|[a-z][\.\)])\s+', text):
+        structural_markers.append("numbered_list")
+
+    # Smart Threshold Logic:
+    # If at least 1 legal/formal marker is present OR at least 2 structural markers (e.g., date + currency), ALLOW IT THROUGH.
+    if len(matched_markers) >= 1:
+        return True, f"Valid legal notice detected ({len(matched_markers)} legal markers identified: {', '.join(matched_markers[:4])})."
+
+    if len(structural_markers) >= 2:
+        return True, f"Formal document structure detected ({', '.join(structural_markers)})."
+
+    # Reject if 0 legal markers and < 2 structural markers
+    return False, "The uploaded file or text does not appear to be a legal notice, contract, or formal demand letter. Please upload a valid legal notice or termination document to run triage."
+

@@ -59,6 +59,7 @@
     "next_steps_heading": "Recommended Next Steps",
     "refresh_button": "Refresh / Start Over",
     "gemma_connected": "Running Locally on Gemma 4",
-    "gemma_disconnected": "Gemma 4 Not Connected"
+    "gemma_disconnected": "Gemma 4 Not Connected",
+    "glossary_heading": "Hard Legal Words Explained (Simple Meaning)"
   }
 }

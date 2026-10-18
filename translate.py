@@ -41,7 +41,18 @@ HINDI_PHRASE_MAP = {
     "None specified": "कुछ निर्दिष्ट नहीं",
     "Within 15 days of receipt": "प्राप्ति के 15 दिनों के भीतर",
     "Within 30 days of receipt": "प्राप्ति के 30 दिनों के भीतर",
-    "Immediately / Forthwith": "तत्काल / अविलंब"
+    "Immediately / Forthwith": "तत्काल / अविलंब",
+    "Preserve the physical notice, envelope, and postal tracking receipts as proof of receipt date.": "प्राप्ति तिथि के प्रमाण के रूप में भौतिक नोटिस, लिफाफा और डाक रसीद सुरक्षित रखें।",
+    "Locate and organize all relevant contracts, receipts, bank statements, and email correspondence.": "सभी प्रासंगिक अनुबंधों, रसीदों, बैंक विवरणों और ईमेल पत्राचार को व्यवस्थित करें।",
+    "Do not sign admissions or make informal payments without independent legal advice.": "स्वतंत्र कानूनी सलाह के बिना किसी भी स्वीकृति पर हस्ताक्षर न करें और न ही अनौपचारिक भुगतान करें।",
+    "Consult a licensed advocate using the Lawyer Escalation Checklist before the response window expires.": "प्रतिक्रिया समय समाप्त होने से पहले वकील परामर्श चेकलिस्ट की सहायता से किसी लाइसेंस प्राप्त अधिवक्ता से परामर्श लें।",
+    "Cure / Rectification Period": "सुधार / निवारण अवधि",
+    "Dispute Resolution & Arbitration Clause": "विवाद समाधान एवं मध्यस्थता खंड",
+    "Statutory Notice Period Specification": "वैधानिक नोटिस अवधि विनिर्देश",
+    "Itemized Accounting & Ledger Breakdown": "मदवार लेखा-जोखा और खाता विवरण",
+    "Payment Method & Remittance Details": "भुगतान विधि और प्रेषण विवरण",
+    "Proof of Authority / Power of Attorney": "प्राधिकार का प्रमाण / मुख्तारनामा (वकालतनामा)",
+    "Designated Court Jurisdiction": "नामित न्यायालय का क्षेत्राधिकार"
 }
 
 TELUGU_PHRASE_MAP = {
@@ -65,7 +76,18 @@ TELUGU_PHRASE_MAP = {
     "None specified": "పేర్కొనబడలేదు",
     "Within 15 days of receipt": "అందిన 15 రోజుల్లోగా",
     "Within 30 days of receipt": "అందిన 30 రోజుల్లోగా",
-    "Immediately / Forthwith": "వెంటనే / ఆలస్యం లేకుండా"
+    "Immediately / Forthwith": "వెంటనే / ఆలస్యం లేకుండా",
+    "Preserve the physical notice, envelope, and postal tracking receipts as proof of receipt date.": "నోటీసు అందిన తేదీకి రుజువుగా అసలు నోటీసు కాపీ, కవర్ మరియు పోస్టల్ రసీదులను భద్రపరుచుకోండి.",
+    "Locate and organize all relevant contracts, receipts, bank statements, and email correspondence.": "అన్ని సంబంధిత ఒప్పందాలు, రసీదులు, బ్యాంక్ స్టేట్‌మెంట్‌లు మరియు ఈమెయిల్ సంభాషణలను సేకరించి సిద్ధంగా ఉంచండి.",
+    "Do not sign admissions or make informal payments without independent legal advice.": "స్వతంత్ర న్యాయ సలహా లేకుండా ఎలాంటి అంగీకార పత్రాలపై సంతకాలు చేయవద్దు లేదా అనధికారిక చెల్లింపులు చేయవద్దు.",
+    "Consult a licensed advocate using the Lawyer Escalation Checklist before the response window expires.": "గడువు ముగిసేలోగా లాయర్ చెక్‌లిస్ట్‌ను ఉపయోగించి అర్హత కలిగిన న్యాయవాదిని సంప్రదించండి.",
+    "Cure / Rectification Period": "సవరణ / సరిదిద్దుకునే గడువు",
+    "Dispute Resolution & Arbitration Clause": "వివాద పరిష్కారం & మధ్యవర్తిత్వ నిబంధన",
+    "Statutory Notice Period Specification": "చట్టబద్ధమైన నోటీసు వ్యవధి వివరాలు",
+    "Itemized Accounting & Ledger Breakdown": "వివరణాత్మక లెక్కలు మరియు ఖాతా వివరాలు",
+    "Payment Method & Remittance Details": "చెల్లింపు విధానం మరియు ఖాతా వివరాలు",
+    "Proof of Authority / Power of Attorney": "అధికార పత్రం / పవర్ ఆఫ్ అటార్నీ (వకాలత్‌నామా)",
+    "Designated Court Jurisdiction": "నిర్దేశిత కోర్టు అధికార పరిధి"
 }
 
 def verify_number_preservation(source_text: str, translated_text: str) -> bool:

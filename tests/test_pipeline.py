@@ -278,3 +278,39 @@ def test_structured_triage_summary_and_next_steps():
     assert isinstance(facts["recommended_next_steps"], list)
     assert len(facts["recommended_next_steps"]) >= 3
 
+def test_multilingual_legal_notice_validation():
+    from ingest import validate_is_legal_notice
+    # Hindi notice
+    hi_notice = "कानूनी नोटिस: अधिवक्ता की ओर से आपको सूचित किया जाता है कि बकाया किराया 45,000 रुपये 15 दिन में अदा करें।"
+    is_valid_hi, _ = validate_is_legal_notice(hi_notice)
+    assert is_valid_hi is True
+
+    # Telugu notice
+    te_notice = "చట్టపరమైన నోటీసు: న్యాయవాది ద్వారా మీకు తెలియజేయునది ఏమనగా అద్దె బకాయిలు వెంటనే చెల్లించాలి."
+    is_valid_te, _ = validate_is_legal_notice(te_notice)
+    assert is_valid_te is True
+
+    # Eviction / formal tenant notice
+    evict_notice = "Dear Tenant, hereby terminate your lease agreement effective immediately. Arrears of rent Rs. 25,000 must be cleared."
+    is_valid_evict, _ = validate_is_legal_notice(evict_notice)
+    assert is_valid_evict is True
+
+def test_legal_glossary_extraction():
+    from explain import extract_legal_glossary
+    doc = "This contract contains an indemnity clause and liquidated damages for breach of obligations with a 15-day cure period."
+    gloss_en = extract_legal_glossary(doc, lang="en")
+    assert len(gloss_en) >= 4
+    terms_en = [g["term"].lower() for g in gloss_en]
+    assert any("indemnity" in t for t in terms_en)
+    assert any("breach" in t for t in terms_en)
+
+    # Hindi
+    gloss_hi = extract_legal_glossary(doc, lang="hi")
+    assert len(gloss_hi) >= 4
+    assert any("क्षतिपूर्ति" in g["term"] for g in gloss_hi)
+
+    # Telugu
+    gloss_te = extract_legal_glossary(doc, lang="te")
+    assert len(gloss_te) >= 4
+    assert any("నష్టపరిహారం" in g["term"] for g in gloss_te)
+

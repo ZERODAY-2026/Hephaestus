@@ -232,62 +232,6 @@ def ingest_document(
 
     raise IngestError("No document provided. Please upload a file or paste notice text.")
 
-# Pre-Triage Legal Document Validation Patterns (EN / HI / TE)
-LEGAL_NOTICE_PATTERNS = [
-    # English Primary Legal Markers
-    r"(?i)\b(?:legal\s+)?notice\b",
-    r"(?i)\bdemand\s+(?:notice|letter|note)\b",
-    r"(?i)\b(?:call\s+upon\s+you|hereby\s+(?:demand|notify|terminate|serve|call))\b",
-    r"(?i)\b(?:section\s+\d+|u/s\s+\d+|clause\s+\d+)\b",
-    r"(?i)\b(?:negotiable\s+instruments|transfer\s+of\s+property|limitation\s+act|arbitration\s+(?:and\s+conciliation)?\s+act)\b",
-    r"(?i)\b(?:cheque\s+(?:no|dishonou?r|bounce)|return\s+memo|insufficient\s+funds)\b",
-    r"(?i)\b(?:tenan(?:t|cy)|landlord|vacate\s+(?:and\s+hand\s+over|the\s+premises)|arrears\s+of\s+rent|mesne\s+profits)\b",
-    r"(?i)\b(?:advocate|counsel|high\s+court|civil\s+court|district\s+court|legal\s+proceedings)\b",
-    r"(?i)\b(?:under\s+instructions\s+from|on\s+behalf\s+of\s+my\s+client)\b",
-    r"(?i)\b(?:breach\s+of\s+(?:contract|agreement|terms)|termination\s+(?:notice|letter)|employment\s+bond)\b",
-    r"(?i)\b(?:outstanding\s+dues|unpaid\s+(?:invoices?|balance|salary)|recover(?:y)?\s+of\s+(?:debt|money))\b",
-    r"(?i)\b(?:without\s+prejudice|failing\s+which|in\s+default\s+whereof|cause\s+of\s+action)\b",
-    r"(?i)\b(?:cure\s+period|rectify\s+(?:the\s+)?default|cease\s+and\s+desist)\b",
-    # Hindi Legal Markers
-    r"(?:कानूनी\s+)?नोटिस",
-    r"(?:मांग\s+पत्र|वैधानिक\s+नोटिस)",
-    r"(?:अधिवक्ता|वकील|मुवक्किल|न्यायालय|अदालत|धारा\s+\d+)",
-    r"(?:चेक\s+बाउंस|अनादरण|अपर्याप्त\s+राशि)",
-    r"(?:किरायेदार|मकान\s+मालिक|परिसर\s+खाली|बकाया\s+किराया)",
-    r"(?:कानूनी\s+कार्रवाई|हर्जाना|वसूली)",
-    # Telugu Legal Markers
-    r"(?:చట్టపరమైన\s+)?నోటీసు",
-    r"(?:డిమాండ్\s+నోటీసు|చట్టబద్ధమైన\s+నోటీసు)",
-    r"(?:న్యాయవాది|క్లయింట్|కోర్టు|సెక్షన్\s+\d+)",
-    r"(?:చెక్\s+బౌన్స్|అనాదరణ)",
-    r"(?:అద్దెదారు|యజమాని|ఖాళీ\s+చేయడం|బకాయిలు)",
-    r"(?:చట్టపరమైన\s+చర్యలు|నష్టపరిహారం)"
-]
+# Pre-Triage Legal Document Validation (Delegates to guardrails.validate_is_legal_notice)
+from guardrails import validate_is_legal_notice, LEGAL_KEYWORDS_EN, LEGAL_KEYWORDS_HI, LEGAL_KEYWORDS_TE
 
-def validate_is_legal_notice(text: str) -> Tuple[bool, str]:
-    """
-    Deterministic Pre-Triage Document Validator.
-    Verifies that the uploaded/pasted text is a legitimate legal notice,
-    statutory demand, or termination letter before invoking any LLM or triage pipeline.
-    Rejects recipes, homework, code, or arbitrary non-legal texts.
-    Returns (is_valid, reason_or_message).
-    """
-    if not text or len(text.strip()) < 40:
-        return False, "The input document is too short (< 40 characters) to be an actionable legal notice."
-
-    import re
-    cleaned = text.strip()
-    matched_markers = []
-    for pattern in LEGAL_NOTICE_PATTERNS:
-        match = re.search(pattern, cleaned)
-        if match:
-            matched_markers.append(match.group(0))
-
-    if len(matched_markers) == 0:
-        return False, "The uploaded file or text does not appear to be a legal notice, contract, or formal demand letter. Please upload a valid legal notice or termination document to run triage."
-
-    # For longer texts (> 200 chars), require at least 2 distinct legal markers to avoid false positives on random text
-    if len(cleaned) > 200 and len(matched_markers) < 2:
-        return False, "The uploaded file or text does not appear to be a legal notice, contract, or formal demand letter. Please upload a valid legal notice or termination document to run triage."
-
-    return True, f"Valid legal notice detected ({len(matched_markers)} legal markers identified)."
