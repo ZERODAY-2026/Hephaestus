@@ -52,6 +52,13 @@
     "lawyer_triage_title": "Triage Priority & Lawyer Consultation Brief",
     "lawyer_questions": "Passage-Specific Questions for Your Advocate",
     "lawyer_docs": "Documents to Gather & Bring",
-    "lawyer_warnings": "Jurisdiction & Procedural Warnings"
+    "lawyer_warnings": "Jurisdiction & Procedural Warnings",
+    "summary_heading": "What This Notice Is About",
+    "deadlines_heading": "Critical Deadlines & Dates",
+    "demands_heading": "Financial Demands & Penalties",
+    "next_steps_heading": "Recommended Next Steps",
+    "refresh_button": "Refresh / Start Over",
+    "gemma_connected": "Running Locally on Gemma 4",
+    "gemma_disconnected": "Gemma 4 Not Connected"
   }
 }

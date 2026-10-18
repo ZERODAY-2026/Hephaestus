@@ -35,10 +35,85 @@ def wipe_temp_directory() -> None:
             except Exception:
                 pass
 
-def extract_text_from_pdf(pdf_path_or_bytes: Any) -> str:
+DEFAULT_OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_VISION_MODEL = "gemma4:e4b"
+
+def transcribe_image_with_vision(
+    image_bytes: bytes,
+    base_url: str = DEFAULT_OLLAMA_URL,
+    model: str = DEFAULT_VISION_MODEL,
+    timeout: int = 120
+) -> str:
     """
-    Extracts text from PDF using PyMuPDF (fitz) with safe fallback.
-    Provides friendly errors for password protection or scanned images without text.
+    Transcribes text from an image (PNG, JPG, WEBP) strictly in-memory.
+    Tier 1: OCR engine if installed (pytesseract or easyocr).
+    Tier 2: Local Gemma 4 Multimodal Vision via Ollama 127.0.0.1 (zero cloud calls).
+    """
+    import io
+
+    # Tier 1: Try local pytesseract if available
+    try:
+        import pytesseract
+        from PIL import Image
+        img = Image.open(io.BytesIO(image_bytes))
+        ocr_text = pytesseract.image_to_string(img).strip()
+        if ocr_text:
+            return ocr_text
+    except Exception:
+        pass
+
+    # Tier 1b: Try local easyocr if available
+    try:
+        import easyocr
+        reader = easyocr.Reader(['en'], gpu=False)
+        results = reader.readtext(image_bytes, detail=0)
+        easy_text = " ".join(results).strip()
+        if easy_text:
+            return easy_text
+    except Exception:
+        pass
+
+    # Tier 2: Local Gemma 4 Multimodal Vision via Ollama 127.0.0.1
+    import base64
+    import json
+    import urllib.request
+
+    b64_img = base64.b64encode(image_bytes).decode("utf-8")
+    payload = {
+        "model": model,
+        "prompt": "Transcribe all text from this legal notice image accurately without commentary.",
+        "images": [b64_img],
+        "stream": False,
+        "options": {
+            "temperature": 0.0
+        }
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/api/generate",
+        data=data,
+        headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            res_json = json.loads(resp.read().decode("utf-8"))
+            return res_json.get("response", "").strip()
+    except Exception as e:
+        raise IngestError(
+            "The document is a scanned image or photo, but local Gemma 4 vision transcription "
+            f"could not reach Ollama at {base_url} (or '{model}' is not loaded). "
+            "Please ensure Ollama is running (`ollama serve`) with gemma4:e4b, or paste the notice text directly."
+        )
+
+def extract_text_from_pdf(
+    pdf_path_or_bytes: Any,
+    base_url: str = DEFAULT_OLLAMA_URL,
+    model: str = DEFAULT_VISION_MODEL
+) -> str:
+    """
+    Extracts text from PDF using PyMuPDF (fitz) with automatic scanned-page fallback.
+    If a page yields < 20 characters, renders page to in-memory pixmap and invokes
+    local Gemma 4 vision transcription.
     """
     try:
         import pymupdf as fitz  # PyMuPDF
@@ -61,15 +136,27 @@ def extract_text_from_pdf(pdf_path_or_bytes: Any) -> str:
         full_text = []
         for page_num in range(len(doc)):
             page = doc.load_page(page_num)
-            text = page.get_text("text")
+            text = page.get_text("text").strip()
+            # Scanned page fallback if text is missing or extremely sparse (< 20 chars)
+            if len(text) < 20:
+                try:
+                    pix = page.get_pixmap(dpi=150)
+                    img_bytes = pix.tobytes("png")
+                    vision_text = transcribe_image_with_vision(img_bytes, base_url=base_url, model=model)
+                    if vision_text:
+                        text = vision_text
+                except IngestError:
+                    raise
+                except Exception:
+                    pass
             if text:
                 full_text.append(text)
 
         doc.close()
 
         extracted = "\n\n".join(full_text).strip()
-        if not extracted:
-            raise IngestError("The PDF appears to be a scanned image or empty. NoticeGuard currently requires text-based PDFs.")
+        if not extracted or len(extracted) < 10:
+            raise IngestError("The PDF appears to be a scanned image or empty. No readable text could be extracted.")
         
         return extracted
     except IngestError:
@@ -80,10 +167,13 @@ def extract_text_from_pdf(pdf_path_or_bytes: Any) -> str:
 def ingest_document(
     file_bytes: Optional[bytes] = None,
     file_name: Optional[str] = None,
-    pasted_text: Optional[str] = None
+    pasted_text: Optional[str] = None,
+    base_url: str = DEFAULT_OLLAMA_URL,
+    model: str = DEFAULT_VISION_MODEL
 ) -> Dict[str, Any]:
     """
     Unified ingestion entry point. Accepts uploaded file bytes or pasted string.
+    Supports PDF, TXT, PNG, JPG, JPEG, and WEBP.
     Returns metadata dict: { 'source': ..., 'text': ..., 'char_count': ..., 'format': ... }
     """
     if pasted_text and pasted_text.strip():
@@ -101,7 +191,7 @@ def ingest_document(
 
         ext = os.path.splitext(file_name)[1].lower()
         if ext == ".pdf":
-            text = extract_text_from_pdf(file_bytes)
+            text = extract_text_from_pdf(file_bytes, base_url=base_url, model=model)
             return {
                 "source": file_name,
                 "format": "pdf",
@@ -126,8 +216,19 @@ def ingest_document(
                 "text": text,
                 "char_count": len(text)
             }
+        elif ext in [".png", ".jpg", ".jpeg", ".webp"]:
+            text = transcribe_image_with_vision(file_bytes, base_url=base_url, model=model)
+            text = text.strip()
+            if not text:
+                raise IngestError("Could not extract any text from the uploaded image.")
+            return {
+                "source": file_name,
+                "format": ext.lstrip("."),
+                "text": text,
+                "char_count": len(text)
+            }
         else:
-            raise IngestError(f"Unsupported file format '{ext}'. Please upload a PDF or TXT file.")
+            raise IngestError(f"Unsupported file format '{ext}'. Please upload a PDF, image (PNG, JPG, WEBP), or TXT file.")
 
     raise IngestError("No document provided. Please upload a file or paste notice text.")
 

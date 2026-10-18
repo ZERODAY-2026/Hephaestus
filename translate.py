@@ -27,6 +27,8 @@ HINDI_PHRASE_MAP = {
     "Tenancy Termination / Eviction Notice": "किरायेदारी समाप्ति / बेदखली का नोटिस",
     "Employment Bond / Termination Demand": "रोजगार बॉन्ड / समाप्ति मांग नोटिस",
     "Commercial Contract / Service Fee Recovery": "वाणिज्यिक अनुबंध / सेवा शुल्क वसूली नोटिस",
+    "Payment Demand / Recovery Notice": "भुगतान मांग / वसूली नोटिस",
+    "General Legal Demand": "सामान्य कानूनी मांग नोटिस",
     "CRITICAL": "अति आवश्यक",
     "HIGH": "उच्च",
     "MEDIUM": "मध्यम",
@@ -34,7 +36,12 @@ HINDI_PHRASE_MAP = {
     "STATED": "कहा गया",
     "INTERPRETATION": "व्याख्या",
     "UNKNOWN": "अज्ञात",
-    "UNVERIFIED": "असत्यापित"
+    "UNVERIFIED": "असत्यापित",
+    "None stated": "कोई उल्लेख नहीं",
+    "None specified": "कुछ निर्दिष्ट नहीं",
+    "Within 15 days of receipt": "प्राप्ति के 15 दिनों के भीतर",
+    "Within 30 days of receipt": "प्राप्ति के 30 दिनों के भीतर",
+    "Immediately / Forthwith": "तत्काल / अविलंब"
 }
 
 TELUGU_PHRASE_MAP = {
@@ -44,6 +51,8 @@ TELUGU_PHRASE_MAP = {
     "Tenancy Termination / Eviction Notice": "అద్దె ఒప్పందం రద్దు / ఖాళీ చేయాలని నోటీసు",
     "Employment Bond / Termination Demand": "ఉద్యోగ బాండ్ / సర్వీస్ నిబంధనల నోటీసు",
     "Commercial Contract / Service Fee Recovery": "వాణిజ్య ఒప్పందం / సేవా రుసుము రికవరీ నోటీసు",
+    "Payment Demand / Recovery Notice": "చెల్లింపు డిమాండ్ / రికవరీ నోటీసు",
+    "General Legal Demand": "సాధారణ చట్టపరమైన డిమాండ్",
     "CRITICAL": "అత్యవసరం",
     "HIGH": "అధికం",
     "MEDIUM": "మధ్యస్థం",
@@ -51,7 +60,12 @@ TELUGU_PHRASE_MAP = {
     "STATED": "పేర్కొనబడింది",
     "INTERPRETATION": "వివరణ",
     "UNKNOWN": "తెలియదు",
-    "UNVERIFIED": "ధృవీకరించబడలేదు"
+    "UNVERIFIED": "ధృవీకరించబడలేదు",
+    "None stated": "పేర్కొనబడలేదు",
+    "None specified": "పేర్కొనబడలేదు",
+    "Within 15 days of receipt": "అందిన 15 రోజుల్లోగా",
+    "Within 30 days of receipt": "అందిన 30 రోజుల్లోగా",
+    "Immediately / Forthwith": "వెంటనే / ఆలస్యం లేకుండా"
 }
 
 def verify_number_preservation(source_text: str, translated_text: str) -> bool:
@@ -127,7 +141,12 @@ def translate_text(
         )
         resp = query_local_ollama(prompt=prompt, model=model, base_url=base_url)
         if resp:
-            translated = resp.strip()
+            cleaned = resp.strip()
+            cleaned = re.sub(r"^```[\w]*\n?", "", cleaned)
+            cleaned = re.sub(r"\n?```$", "", cleaned)
+            cleaned = cleaned.strip("\"' ")
+            if cleaned:
+                translated = cleaned
 
     if not translated:
         translated = translate_phrase_fallback(text, target_lang)

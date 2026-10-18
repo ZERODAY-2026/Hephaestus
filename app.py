@@ -27,10 +27,16 @@ from guardrails import (
     get_silent_message,
     sanitize_output_verdicts
 )
-from extract import extract_facts, is_ollama_available, query_local_ollama, DEFAULT_MODEL
+from extract import (
+    extract_facts,
+    check_gemma4_status,
+    is_ollama_available,
+    query_local_ollama,
+    DEFAULT_MODEL
+)
 from verify import verify_facts, verify_quote
 from timeline import compute_timeline
-from explain import generate_plain_explanation
+from explain import generate_plain_explanation, answer_followup_question
 from escalate import build_lawyer_checklist
 from translate import translate_text, MACHINE_TRANSLATION_NOTICES
 from missing_clauses import detect_missing_clauses
@@ -40,16 +46,35 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 config = {}
 if os.path.exists(CONFIG_PATH):
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+        config = yaml.safe_load(f) or {}
 
-# Load localized strings
+# Load localized strings safely with fallback to English defaults
 I18N_DIR = os.path.join(os.path.dirname(__file__), "i18n")
 def load_i18n(lang: str) -> dict:
+    base = {}
+    en_path = os.path.join(I18N_DIR, "en.json")
+    if os.path.exists(en_path):
+        try:
+            with open(en_path, "r", encoding="utf-8") as f:
+                base = json.load(f)
+        except Exception:
+            base = {}
+    if lang == "en":
+        return base
+    
     path = os.path.join(I18N_DIR, f"{lang}.json")
     if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lang_data = json.load(f)
+                for k, v in lang_data.items():
+                    if isinstance(v, dict) and isinstance(base.get(k), dict):
+                        base[k].update(v)
+                    else:
+                        base[k] = v
+        except Exception:
+            pass
+    return base
 
 # Load legal glossary
 GLOSSARY_PATH = os.path.join(os.path.dirname(__file__), "glossary.json")
@@ -272,18 +297,25 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(17, 107, 78, 0.3);
     }
 
-    /* Status Pill (Offline / Air-Gapped) */
+    /* Status Pill (Gemma 4 Dynamic Status) */
     .status-pill {
-        background-color: #E6F4EA;
-        color: #166534;
-        border: 1px solid #BBF7D0;
-        padding: 5px 14px;
+        padding: 6px 16px;
         border-radius: 20px;
         font-size: 0.82rem;
-        font-weight: 600;
+        font-weight: 700;
         display: inline-flex;
         align-items: center;
         gap: 6px;
+    }
+    .status-pill-connected {
+        background-color: #E6F4EA !important;
+        color: #166534 !important;
+        border: 1px solid #BBF7D0 !important;
+    }
+    .status-pill-disconnected {
+        background-color: #FEF2F2 !important;
+        color: #991B1B !important;
+        border: 1px solid #FCA5A5 !important;
     }
 
     /* Non-lawyer Legal Disclaimer */
@@ -318,28 +350,31 @@ st.markdown("""
         background: #DCFCE7;
         color: #15803D;
         border: 1px solid #86EFAC;
-        padding: 2px 10px;
+        padding: 3px 12px;
         border-radius: 12px;
-        font-size: 0.74rem;
+        font-size: 0.76rem;
         font-weight: 700;
+        display: inline-block;
     }
     .badge-fuzzy {
-        background: #FEF3C7;
-        color: #B45309;
-        border: 1px solid #FCD34D;
-        padding: 2px 10px;
+        background: #EFF6FF;
+        color: #1D4ED8;
+        border: 1px solid #93C5FD;
+        padding: 3px 12px;
         border-radius: 12px;
-        font-size: 0.74rem;
+        font-size: 0.76rem;
         font-weight: 700;
+        display: inline-block;
     }
-    .badge-unverified {
-        background: #FEE2E2;
-        color: #B91C1C;
-        border: 1px solid #FCA5A5;
-        padding: 2px 10px;
+    .badge-inference {
+        background: #F1F5F9;
+        color: #475569;
+        border: 1px solid #CBD5E1;
+        padding: 3px 12px;
         border-radius: 12px;
-        font-size: 0.74rem;
-        font-weight: 700;
+        font-size: 0.76rem;
+        font-weight: 600;
+        display: inline-block;
     }
 
     /* Feature trust bar */
@@ -362,8 +397,8 @@ if "receipt_date" not in st.session_state:
     st.session_state.receipt_date = date.today()
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
-if "dev_mock_mode" not in st.session_state:
-    st.session_state.dev_mock_mode = False
+if "qa_history" not in st.session_state:
+    st.session_state.qa_history = []
 if "nav_page" not in st.session_state:
     st.session_state.nav_page = "New Analysis"
 if "validation_error" not in st.session_state:
@@ -372,12 +407,15 @@ if "selected_sample" not in st.session_state:
     st.session_state.selected_sample = "Select a sample notice..."
 
 def wipe_all_session():
-    st.session_state.doc_data = None
-    st.session_state.chat_history = []
-    st.session_state.receipt_date = date.today()
-    st.session_state.validation_error = None
+    st.session_state.clear()
     wipe_temp_directory()
     st.toast("Session wiped completely. All document data erased from RAM.", icon="🧹")
+
+# Load current config and Gemma 4 health status
+base_ollama_url = config.get("ollama", {}).get("base_url", "http://127.0.0.1:11434")
+configured_model = config.get("ollama", {}).get("model", "gemma4:e4b")
+gemma_connected, detected_model = check_gemma4_status(base_ollama_url, configured_model)
+active_model_name = detected_model or configured_model
 
 # Left Sidebar
 with st.sidebar:
@@ -437,31 +475,17 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#94A3B8; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Developer Controls</p>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size:0.75rem; font-weight:700; color:#94A3B8; text-transform:uppercase; letter-spacing:0.05em; margin-bottom:6px;'>Local Engine Status</p>", unsafe_allow_html=True)
     
-    # Offline Developer Mock Mode Toggle
-    dev_mock = st.toggle(
-        "⚡ Dev Mock Mode",
-        value=st.session_state.dev_mock_mode,
-        help="Forces instant deterministic extraction without waiting for the local Ollama daemon. Ideal for rapid offline judge demos."
-    )
-    if dev_mock != st.session_state.dev_mock_mode:
-        st.session_state.dev_mock_mode = dev_mock
-        st.rerun()
-
-    # Ollama status check
-    base_ollama_url = config.get("ollama", {}).get("base_url", "http://127.0.0.1:11434")
-    ollama_ok = not st.session_state.dev_mock_mode and is_ollama_available(base_ollama_url)
-    if st.session_state.dev_mock_mode:
-        st.info("● Dev Mock Mode Active (Instant Offline Triage)")
-    elif ollama_ok:
-        st.success(f"● Local Gemma 4 Active ({config.get('ollama', {}).get('model', 'gemma4:e4b')})")
+    if gemma_connected:
+        st.success(f"● Local Gemma 4 Active ({active_model_name})")
     else:
-        st.warning("● Offline Deterministic Mode (Ollama Stopped)")
+        st.error(f"● Gemma 4 Disconnected ({configured_model})")
 
     st.markdown("---")
-    if st.button("🗑️ " + i18n.get("ui", {}).get("wipe_session", "Wipe Session"), use_container_width=True, type="secondary"):
-        wipe_all_session()
+    if st.button("🔄 " + i18n.get("ui", {}).get("refresh_button", "Refresh / Start Over"), key="sidebar_refresh_btn", use_container_width=True, type="secondary"):
+        st.session_state.clear()
+        wipe_temp_directory()
         st.rerun()
 
     st.markdown("---")
@@ -471,7 +495,7 @@ with st.sidebar:
             st.caption(term_info['plain_meaning'])
 
 # Top Bar Status & Hero Header
-top_col1, top_col2 = st.columns([3, 1])
+top_col1, top_col2 = st.columns([3, 1.4])
 with top_col1:
     st.markdown("""
     <div style="color: #116B4E; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 4px;">
@@ -484,11 +508,33 @@ with top_col1:
         Upload your legal notice, get a clear summary, and know what to do next. No jargon. No confusion. Just the important stuff.
     </p>
     """, unsafe_allow_html=True)
+
 with top_col2:
-    status_label = "⚡ Dev Mock Mode (Instant)" if st.session_state.dev_mock_mode else ("● Offline Mode (Gemma 4 Local)" if ollama_ok else "● Offline Mode (Deterministic)")
+    if gemma_connected:
+        st.markdown(f"""
+        <div style="text-align: right; margin-top: 10px; margin-bottom: 8px;">
+            <span class="status-pill status-pill-connected">🟢 Running Locally on Gemma 4 ({active_model_name})</span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div style="text-align: right; margin-top: 10px; margin-bottom: 8px;">
+            <span class="status-pill status-pill-disconnected">🔴 Gemma 4 Not Connected</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if st.button("🔄 " + i18n.get("ui", {}).get("refresh_button", "Refresh / Start Over"), key="top_refresh_btn", use_container_width=True, help="Reset session and start over"):
+        st.session_state.clear()
+        wipe_temp_directory()
+        st.rerun()
+
+# Disconnected / Model Missing Actionable Warning Banner
+if not gemma_connected:
+    host_clean = base_ollama_url.replace("http://", "").replace("https://", "")
     st.markdown(f"""
-    <div style="text-align: right; margin-top: 10px;">
-        <span class="status-pill">{status_label}</span>
+    <div style="background-color: #FEF2F2; border: 1px solid #FCA5A5; border-left: 5px solid #DC2626; border-radius: 8px; padding: 14px 18px; margin-bottom: 20px;">
+        <strong style="color: #991B1B; font-size: 0.95rem;">⚠️ Local Gemma 4 Model Not Detected:</strong>
+        <span style="color: #7F1D1D; font-size: 0.92rem; line-height: 1.5;"> NoticeGuard cannot reach Ollama at <code>{host_clean}</code> or <code>{configured_model}</code> is not installed. Please start Ollama (<code>ollama serve</code>) and ensure <code>ollama pull {configured_model}</code> has completed.</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -507,7 +553,7 @@ if st.session_state.nav_page == "Settings":
         st.markdown(f"**Primary Model:** `{config.get('ollama', {}).get('model', 'gemma4:e4b')}`")
         st.markdown(f"**Fallback Model:** `{config.get('ollama', {}).get('fallback_model', 'gemma4:2b')}`")
         st.markdown(f"**Request Timeout:** `{config.get('ollama', {}).get('timeout_seconds', 180)} seconds`")
-        st.markdown(f"**Fuzzy Quote Threshold:** `{config.get('verifier', {}).get('fuzzy_threshold', 88.0)}%`")
+        st.markdown(f"**Fuzzy Quote Threshold:** `{config.get('verifier', {}).get('fuzzy_threshold', 65.0)}%`")
         st.markdown(f"**Air-Gapped Telemetry:** Disabled (`gatherUsageStats = false`)")
         st.markdown(f"**Zero-Persistence RAM Processing:** Active")
     st.stop()
@@ -524,19 +570,17 @@ if st.session_state.nav_page == "Past Reports":
 def render_grounding_badge(item: dict) -> str:
     status = item.get("status", "UNVERIFIED")
     m_type = item.get("match_type", "unverified")
-    sc = item.get("score", 0.0)
     p_id = item.get("passage_id")
-    p_suffix = f" in {p_id}" if p_id else ""
-    if status == "STATED" and m_type == "exact":
-        return f"<span class='badge-exact'>🟢 EXACT MATCH (100%{p_suffix})</span>"
-    elif status == "STATED" and m_type in ("normalized_whitespace", "normalized"):
-        return f"<span class='badge-exact'>🔵 VERIFIED SUBSTRING (98%{p_suffix})</span>"
-    elif status == "STATED" and m_type == "fuzzy":
-        return f"<span class='badge-fuzzy'>🟡 FUZZY GROUNDED ({sc}%{p_suffix})</span>"
+    p_suffix = f" (Passage [{p_id}])" if p_id else ""
+    if status == "STATED" and m_type in ("exact", "normalized_whitespace", "normalized"):
+        return f"<span class='badge-exact'>✅ Verified Direct Quote{p_suffix}</span>"
+    elif status == "STATED" and m_type in ("fuzzy", "paraphrase", "grounded_summary"):
+        p_str = f"Passage [{p_id}]" if p_id else "Notice Passages"
+        return f"<span class='badge-fuzzy'>☑️ Grounded Summary (Paraphrased from {p_str})</span>"
     elif status == "UNKNOWN":
-        return "<span class='badge-fuzzy' style='background:#F1F5F9;color:#64748B;border-color:#CBD5E1;'>⚪ NOT STATED IN NOTICE</span>"
+        return "<span class='badge-inference'>⚪ Not Stated in Notice</span>"
     else:
-        return f"<span class='badge-unverified'>🔴 UNVERIFIED CLAIM ({sc}%)</span>"
+        return "<span class='badge-inference'>ℹ️ Contextual Inference</span>"
 
 # MAIN INTERACTION CARD: "1. Upload Your Notice"
 if st.session_state.doc_data is None:
@@ -569,9 +613,9 @@ if st.session_state.doc_data is None:
     with col_hero_input:
         # File Uploader
         uploaded_file = st.file_uploader(
-            "Upload Notice Document (PDF or TXT):",
-            type=["pdf", "txt"],
-            help="Your file is parsed strictly in memory (RAM). Never saved to disk or transmitted to the cloud."
+            "Upload Notice Document (PDF, TXT, or Image):",
+            type=["pdf", "txt", "png", "jpg", "jpeg", "webp"],
+            help="Your file is parsed strictly in memory (RAM). Scanned documents are transcribed locally via Gemma 4 Vision. Never transmitted to the cloud."
         )
 
         # OR Divider
@@ -673,7 +717,13 @@ if st.session_state.doc_data is None:
             with st.spinner("Analyzing notice locally on your laptop..."):
                 try:
                     # 1. Ingest
-                    ingest_res = ingest_document(file_bytes=file_bytes, file_name=file_name, pasted_text=input_text)
+                    ingest_res = ingest_document(
+                        file_bytes=file_bytes,
+                        file_name=file_name,
+                        pasted_text=input_text,
+                        base_url=base_ollama_url,
+                        model=configured_model
+                    )
                     raw_text = ingest_res["text"]
 
                     # 2. Pre-Triage Legal Document Validation (Agent 3 Guardrail)
@@ -695,9 +745,8 @@ if st.session_state.doc_data is None:
                     # 4. Segment into numbered passages (P1, P2...)
                     passages = segment_notice(raw_text)
 
-                    # 5. Extraction (respecting dev_mock_mode)
-                    force_mock = st.session_state.dev_mock_mode
-                    raw_facts = extract_facts(sanitized_text, passages, force_mock=force_mock)
+                    # 5. Extraction
+                    raw_facts = extract_facts(sanitized_text, passages, base_url=base_ollama_url, model=configured_model)
 
                     # 6. Deterministic Code Verification (Quotes, Amounts, Dates, Breach, Actions, Penalties)
                     verified_facts = verify_facts(raw_facts, raw_text, passages)
@@ -706,7 +755,7 @@ if st.session_state.doc_data is None:
                     timeline_res = compute_timeline(verified_facts, receipt_date=st.session_state.receipt_date)
 
                     # 8. Plain-Language Paraphrases (STATED, INTERPRETATION, UNKNOWN)
-                    explanations = generate_plain_explanation(passages, verified_facts, force_mock=force_mock)
+                    explanations = generate_plain_explanation(passages, verified_facts, base_url=base_ollama_url, model=configured_model)
 
                     # 9. Silent & Missing Clause Detection (PS2 Requirement)
                     missing_clauses_res = detect_missing_clauses(raw_text, passages)
@@ -761,7 +810,7 @@ if st.session_state.doc_data is not None:
     def loc_val(text: Any) -> str:
         s = str(text or "")
         if current_lang != "en" and s and s not in ("None", "null", "Unknown", "None stated", "Not specified"):
-            return translate_text(s, current_lang, force_mock=st.session_state.dev_mock_mode)["text"]
+            return translate_text(s, current_lang, base_url=base_ollama_url, model=configured_model)["text"]
         return s
 
     # 7 Specialized PS2 Capability Tabs
@@ -776,12 +825,12 @@ if st.session_state.doc_data is not None:
         f"💬 {ui_strings.get('tab_qa', 'Ask a Question')}"
     ])
 
-    # 1. TAB: STRUCTURED TRIAGE FACT SHEET
+    # 1. TAB: STRUCTURED TRIAGE FACT SHEET (Human-Friendly 4 Pillars)
     with t1:
         st.markdown("""
         <div class="card-container">
             <h3 style="color:#0F172A; font-weight:700; margin-top:0;">📋 Structured Legal Triage Fact Sheet</h3>
-            <p style="color:#64748B; font-size:0.9rem;">Deterministic extraction of deadlines, financial claims, breach allegations, and required actions.</p>
+            <p style="color:#64748B; font-size:0.9rem;">Verified factual summary structured into plain-language sections for immediate clarity.</p>
         """, unsafe_allow_html=True)
 
         # Urgency & Category Banner
@@ -796,71 +845,83 @@ if st.session_state.doc_data is not None:
 
         st.markdown("---")
 
-        # 4 Core PS2 Pillars
-        grid_col1, grid_col2 = st.columns(2)
+        # PILLAR 1: WHAT THIS NOTICE IS ABOUT
+        summary_title = ui_strings.get("summary_heading", "What This Notice Is About")
+        raw_summary = facts.get("summary") or (
+            f"This formal notice was issued by {facts.get('sender', {}).get('value', 'the sender')} directed to "
+            f"{facts.get('recipient', {}).get('value', 'the recipient')}. It alleges {facts.get('termination_breach', {}).get('value', 'a breach of obligations')} "
+            f"and asserts a demand concerning {facts.get('amount', {}).get('value', 'unspecified amounts')}."
+        )
+        st.markdown(f"#### 📖 1. {summary_title}")
+        st.markdown(f"""
+        <div style="background-color: #F8FAFC; border: 1px solid #E2E8F0; border-left: 4px solid #116B4E; border-radius: 8px; padding: 16px 20px; font-size: 0.98rem; line-height: 1.6; color: #1E293B; margin-bottom: 20px;">
+            {loc_val(raw_summary)}
+        </div>
+        """, unsafe_allow_html=True)
 
-        with grid_col1:
-            # Pillar 1: Core Deadlines
-            st.markdown(f"#### ⏳ {ui_strings.get('deadline', 'Core Deadlines & Timeline')}")
-            st.markdown(f"**Calculated Deadline:** `{timeline.get('computed_deadline')}`")
-            if timeline.get("days_remaining") is not None:
-                if timeline["days_remaining"] < 0:
-                    st.error(f"⚠️ Deadline passed {abs(timeline['days_remaining'])} days ago!")
-                elif timeline["days_remaining"] == 0:
-                    st.error("⚠️ Deadline is TODAY!")
+        # PILLAR 2: CRITICAL DEADLINES & DATES
+        dl_title = ui_strings.get("deadlines_heading", "Critical Deadlines & Dates")
+        st.markdown(f"#### ⏳ 2. {dl_title}")
+        dl_fact = facts.get("deadline", {})
+        computed_dl = timeline.get("computed_deadline", "None specified")
+        days_rem = timeline.get("days_remaining")
+        
+        col_dl1, col_dl2 = st.columns([1.6, 1])
+        with col_dl1:
+            st.markdown(f"- **Calculated Next Deadline:** `{computed_dl}`")
+            if days_rem is not None:
+                if days_rem < 0:
+                    st.error(f"⚠️ Response deadline passed {abs(days_rem)} days ago!")
+                elif days_rem == 0:
+                    st.error("⚠️ Response deadline is TODAY!")
                 else:
-                    st.info(f"⏳ **{timeline['days_remaining']} calendar days remaining** from receipt date ({st.session_state.receipt_date.strftime('%d %b %Y')}).")
-            
-            dl_fact = facts.get("deadline", {})
+                    st.info(f"⏳ **{days_rem} calendar days remaining** from notice receipt date ({st.session_state.receipt_date.strftime('%d %b %Y')}).")
+            if timeline.get("is_ambiguous"):
+                st.warning("⚠️ Ambiguous Timeline: The notice demands action 'forthwith' or 'immediately' without a clear statutory day count.")
+        with col_dl2:
             st.markdown(render_grounding_badge(dl_fact), unsafe_allow_html=True)
             if dl_fact.get("quote"):
                 st.markdown(f"<div class='quote-box'>Stated in Notice: \"{dl_fact['quote']}\"</div>", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
-            # Pillar 2: Termination & Breach
-            st.markdown(f"#### 🚫 {ui_strings.get('breach', 'Termination & Breach Allegation')}")
-            breach_fact = facts.get("termination_breach", {})
-            st.write(loc_val(breach_fact.get("value", "Not specified")))
-            st.markdown(render_grounding_badge(breach_fact), unsafe_allow_html=True)
-            if breach_fact.get("quote"):
-                st.markdown(f"<div class='quote-box'>Verified Quote ({breach_fact.get('passage_id') or 'Doc'}): \"{breach_fact['quote']}\"</div>", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
-
-        with grid_col2:
-            # Pillar 3: Financial Demands & Penalties
-            st.markdown(f"#### 💰 {ui_strings.get('amount', 'Financial Demands & Penalties')}")
-            amt_fact = facts.get("amount", {})
-            st.markdown(f"**Principal Claim:** `{amt_fact.get('value', 'None stated')}`")
+        # PILLAR 3: FINANCIAL DEMANDS / PENALTIES
+        fin_title = ui_strings.get("demands_heading", "Financial Demands / Penalties")
+        st.markdown(f"#### 💰 3. {fin_title}")
+        amt_fact = facts.get("amount", {})
+        pen_fact = facts.get("financial_penalties", {})
+        
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            st.markdown(f"- **Principal Monetary Claim:** `{amt_fact.get('value', 'None specified')}`")
             st.markdown(render_grounding_badge(amt_fact), unsafe_allow_html=True)
             if amt_fact.get("quote"):
                 st.markdown(f"<div class='quote-box'>Verified Quote: \"{amt_fact['quote']}\"</div>", unsafe_allow_html=True)
+        with col_f2:
+            pen_val = pen_fact.get("value") or "None specified"
+            st.markdown(f"- **Interest / Additional Penalties:** {loc_val(pen_val)}")
+            st.markdown(render_grounding_badge(pen_fact), unsafe_allow_html=True)
+            if pen_fact.get("quote"):
+                st.markdown(f"<div class='quote-box'>Verified Quote: \"{pen_fact['quote']}\"</div>", unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
 
-            pen_fact = facts.get("financial_penalties", {})
-            if pen_fact.get("value") and pen_fact.get("value") != "None specified":
-                st.markdown(f"**Interest / Additional Penalties:** {loc_val(pen_fact['value'])}")
-                st.markdown(render_grounding_badge(pen_fact), unsafe_allow_html=True)
-                if pen_fact.get("quote"):
-                    st.markdown(f"<div class='quote-box'>Verified Quote: \"{pen_fact['quote']}\"</div>", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
+        # PILLAR 4: RECOMMENDED NEXT STEPS
+        steps_title = ui_strings.get("next_steps_heading", "Recommended Next Steps")
+        st.markdown(f"#### 🛡️ 4. {steps_title}")
+        default_steps = [
+            "Preserve the physical notice, envelope, and postal tracking receipts as proof of receipt date.",
+            "Locate and organize all relevant contracts, receipts, bank statements, and email correspondence.",
+            "Do not sign admissions or make informal payments without independent legal advice.",
+            "Consult a licensed advocate using the Lawyer Escalation Checklist before the response window expires."
+        ]
+        steps_to_show = facts.get("recommended_next_steps") or default_steps
+        for step_text in steps_to_show:
+            st.markdown(f"- [ ] {loc_val(step_text)}")
 
-            # Pillar 4: Required Actions & Consequences
-            st.markdown(f"#### ⚡ {ui_strings.get('required_actions', 'Required Actions & Consequences')}")
-            act_fact = facts.get("required_actions", {})
-            st.markdown(f"**Demanded Action:** {loc_val(act_fact.get('value', facts['demand']['value']))}")
-            st.markdown(render_grounding_badge(act_fact), unsafe_allow_html=True)
-            if act_fact.get("quote"):
-                st.markdown(f"<div class='quote-box'>Verified Quote: \"{act_fact['quote']}\"</div>", unsafe_allow_html=True)
-
-            cons_fact = facts.get("consequence", {})
-            st.markdown(f"**Stated Legal Consequence:** {loc_val(cons_fact.get('value', 'None specified'))}")
-            st.markdown(render_grounding_badge(cons_fact), unsafe_allow_html=True)
-            if cons_fact.get("quote"):
-                st.markdown(f"<div class='quote-box'>Verified Quote: \"{cons_fact['quote']}\"</div>", unsafe_allow_html=True)
-            st.markdown("<br>", unsafe_allow_html=True)
-
-        # Parties Row
+        st.markdown("<br>", unsafe_allow_html=True)
         st.markdown("---")
-        st.markdown("#### 👥 Notice Parties")
+
+        # DETAILED PARTIES & ALLEGATIONS
+        st.markdown("#### 👥 Notice Parties & Detailed Allegations")
         col_p1, col_p2 = st.columns(2)
         with col_p1:
             st.markdown(f"**{ui_strings.get('sender', 'Sender')}:** {facts['sender']['value']}")
@@ -872,6 +933,24 @@ if st.session_state.doc_data is not None:
             st.markdown(render_grounding_badge(facts['recipient']), unsafe_allow_html=True)
             if facts['recipient']['quote']:
                 st.markdown(f"<div class='quote-box'>Verified from {facts['recipient']['passage_id'] or 'Document'}: \"{facts['recipient']['quote']}\"</div>", unsafe_allow_html=True)
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        col_a1, col_a2 = st.columns(2)
+        with col_a1:
+            breach_fact = facts.get("termination_breach", {})
+            st.markdown(f"**{ui_strings.get('breach', 'Termination & Breach Allegation')}:**")
+            st.write(loc_val(breach_fact.get("value", "Not specified")))
+            st.markdown(render_grounding_badge(breach_fact), unsafe_allow_html=True)
+            if breach_fact.get("quote"):
+                st.markdown(f"<div class='quote-box'>Verified Quote ({breach_fact.get('passage_id') or 'Doc'}): \"{breach_fact['quote']}\"</div>", unsafe_allow_html=True)
+
+        with col_a2:
+            act_fact = facts.get("required_actions", {})
+            st.markdown(f"**{ui_strings.get('required_actions', 'Required Actions & Demands')}:**")
+            st.markdown(f"{loc_val(act_fact.get('value', facts['demand']['value']))}")
+            st.markdown(render_grounding_badge(act_fact), unsafe_allow_html=True)
+            if act_fact.get("quote"):
+                st.markdown(f"<div class='quote-box'>Verified Quote: \"{act_fact['quote']}\"</div>", unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -919,9 +998,9 @@ if st.session_state.doc_data is not None:
                 unknown_text = item.get("unknown", "")
 
                 if current_lang != "en":
-                    stated_text = translate_text(stated_text, current_lang, force_mock=st.session_state.dev_mock_mode)["text"]
-                    interp_text = translate_text(interp_text, current_lang, force_mock=st.session_state.dev_mock_mode)["text"]
-                    unknown_text = translate_text(unknown_text, current_lang, force_mock=st.session_state.dev_mock_mode)["text"]
+                    stated_text = translate_text(stated_text, current_lang, base_url=base_ollama_url, model=configured_model)["text"]
+                    interp_text = translate_text(interp_text, current_lang, base_url=base_ollama_url, model=configured_model)["text"]
+                    unknown_text = translate_text(unknown_text, current_lang, base_url=base_ollama_url, model=configured_model)["text"]
 
                 st.markdown(f"<span style='color:#0284C7; font-weight:700;'>● {i18n.get('labels', {}).get('stated', 'STATED')}:</span> {stated_text}", unsafe_allow_html=True)
                 st.markdown(f"<span style='color:#D97706; font-weight:700;'>● {i18n.get('labels', {}).get('interpretation', 'INTERPRETATION')}:</span> {interp_text}", unsafe_allow_html=True)
@@ -988,19 +1067,19 @@ if st.session_state.doc_data is not None:
         st.markdown(f"#### ❓ {ui_strings.get('lawyer_questions', 'Passage-Specific Questions for Your Advocate')}")
         for q in checklist["questions"]:
             if current_lang != "en":
-                q = translate_text(q, current_lang, force_mock=st.session_state.dev_mock_mode)["text"]
+                q = translate_text(q, current_lang, base_url=base_ollama_url, model=configured_model)["text"]
             st.markdown(f"- [ ] {q}")
 
         st.markdown(f"#### 📁 {ui_strings.get('lawyer_docs', 'Documents to Gather & Bring')}")
         for doc_item in checklist["documents_to_bring"]:
             if current_lang != "en":
-                doc_item = translate_text(doc_item, current_lang, force_mock=st.session_state.dev_mock_mode)["text"]
+                doc_item = translate_text(doc_item, current_lang, base_url=base_ollama_url, model=configured_model)["text"]
             st.markdown(f"- [ ] {doc_item}")
 
         st.markdown(f"#### ⚠️ {ui_strings.get('lawyer_warnings', 'Jurisdiction & Procedural Warnings')}")
         for w in checklist["jurisdiction_warnings"]:
             if current_lang != "en":
-                w = translate_text(w, current_lang, force_mock=st.session_state.dev_mock_mode)["text"]
+                w = translate_text(w, current_lang, base_url=base_ollama_url, model=configured_model)["text"]
             st.warning(w)
 
         st.markdown("</div>", unsafe_allow_html=True)
@@ -1013,75 +1092,70 @@ if st.session_state.doc_data is not None:
             <p style="color:#64748B; font-size:0.9rem;">Answers are strictly grounded in verified notice passages. Legal advice, liability verdicts, and enforceability questions are strictly refused.</p>
         """, unsafe_allow_html=True)
 
-        user_query = st.text_input(
-            "Your Question:",
-            placeholder=ui_strings.get("ask_placeholder", "e.g. 'What is the amount demanded?' or 'By when must I respond?'")
-        )
+        with st.form("qa_form", clear_on_submit=False):
+            user_query = st.text_input(
+                "Your Question:",
+                placeholder=ui_strings.get("ask_placeholder", "e.g. 'What is the amount demanded?' or 'By when must I respond?'"),
+                key="qa_input_field"
+            )
+            submit_qa = st.form_submit_button("Ask Question", type="primary")
 
-        if st.button("Submit Question", type="primary"):
+        if submit_qa:
             if not user_query.strip():
                 st.warning("Please type a question.")
             else:
                 q = user_query.strip()
-                
-                # Check 1: Injection scan on user query
-                is_inj, _ = scan_for_injection(q)
-                if is_inj:
-                    st.error("Query contains disallowed override instructions.")
-                
-                # Check 2: Verdict refusal trigger ("Is this legal?", "Should I pay?", etc.)
-                elif is_verdict_query(q):
-                    refusal = get_refusal_message(current_lang, i18n)
-                    st.warning(f"🚫 {refusal}")
-                    st.session_state.chat_history.append((q, refusal, "refusal"))
+                with st.spinner("Finding grounded answer in document passages..."):
+                    res = answer_followup_question(
+                        question=q,
+                        passages=passages,
+                        lang=current_lang,
+                        base_url=base_ollama_url,
+                        model=configured_model
+                    )
+                    ans_text = res.get("answer", "")
+                    ans_pid = res.get("passage_id")
+                    ans_status = res.get("status", "grounded")
+                    st.session_state.qa_history.append((q, ans_text, ans_status, ans_pid))
+                    st.session_state.chat_history.append((q, ans_text, ans_status))
 
-                else:
-                    # Check 3: Answer from document or trigger silent handler
-                    answer = None
-                    matched_passage = None
-                    
-                    # Search passages for keywords
-                    q_lower = q.lower()
-                    relevant_passages = []
-                    for p in passages:
-                        p_low = p["text"].lower()
-                        tokens = [t for t in re.findall(r'\w+', q_lower) if len(t) > 3]
-                        overlap = sum(1 for t in tokens if t in p_low)
-                        if overlap > 0:
-                            relevant_passages.append((overlap, p))
-                    
-                    relevant_passages.sort(key=lambda x: x[0], reverse=True)
-                    
-                    if relevant_passages:
-                        best_p = relevant_passages[0][1]
-                        matched_passage = best_p["id"]
-                        
-                        if not st.session_state.dev_mock_mode and is_ollama_available():
-                            qa_prompt = f"Answer this question strictly using only the text below. If the text does not contain the answer, say 'NOT_ADDRESSED'.\n\nText:\n{best_p['text']}\n\nQuestion: {q}"
-                            raw_ans = query_local_ollama(prompt=qa_prompt)
-                            if raw_ans and "NOT_ADDRESSED" not in raw_ans:
-                                answer = sanitize_output_verdicts(raw_ans)
-                        
-                        if not answer:
-                            answer = f"According to passage [{best_p['id']}]: \"{best_p['text'][:250]}...\""
-                    
-                    if not answer or "not address" in answer.lower():
-                        answer = get_silent_message(current_lang, i18n)
-                        st.info(f"ℹ️ {answer}")
-                        st.session_state.chat_history.append((q, answer, "silent"))
-                    else:
-                        st.success(answer)
-                        if matched_passage:
-                            st.caption(f"Grounded in verified passage: [{matched_passage}]")
-                        st.session_state.chat_history.append((q, answer, "grounded"))
+        # Render latest answer in high-contrast card right below input box
+        if st.session_state.qa_history:
+            latest_q, latest_a, latest_status, latest_pid = st.session_state.qa_history[-1]
+            p_badge = f"<span class='badge-exact' style='background:#1E293B;color:#38BDF8;border-color:#0284C7;'>Grounded in Passage [{latest_pid}]</span>" if latest_pid else ""
+            if latest_status == "refusal":
+                badge_html = "<span class='badge-fuzzy' style='background:#FEF3C7;color:#92400E;border-color:#FCD34D;'>⚖️ Legal Disclaimer Refusal</span>"
+            elif latest_status == "silent":
+                badge_html = "<span class='badge-inference'>⚪ Not Addressed in Notice</span>"
+            elif latest_pid:
+                badge_html = p_badge
+            else:
+                badge_html = "<span class='badge-fuzzy'>☑️ Grounded Document Answer</span>"
 
-        # Display history
-        if st.session_state.chat_history:
+            st.markdown(f"""
+            <div style="background-color: #0F172A; color: #FFFFFF; border-radius: 12px; padding: 22px 26px; margin: 18px 0; border: 1px solid #334155; box-shadow: 0 4px 16px rgba(0,0,0,0.18);">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <span style="color: #38BDF8; font-weight: 700; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em;">💬 NoticeGuard Grounded Answer</span>
+                    {badge_html}
+                </div>
+                <div style="font-size: 1.05rem; line-height: 1.6; color: #F8FAFC; margin-bottom: 12px;">
+                    {latest_a}
+                </div>
+                <div style="font-size: 0.82rem; color: #94A3B8; border-top: 1px solid #1E293B; padding-top: 8px;">
+                    <strong>Question:</strong> "{latest_q}"
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Display previous Q&A history
+        if len(st.session_state.qa_history) > 1:
             st.markdown("---")
-            st.markdown("##### Previous Questions:")
-            for prev_q, prev_a, kind in reversed(st.session_state.chat_history[-5:]):
+            st.markdown("##### 📜 Previous Q&A:")
+            for prev_q, prev_a, prev_status, prev_pid in reversed(st.session_state.qa_history[:-1][-4:]):
                 st.markdown(f"**Q:** {prev_q}")
                 st.markdown(f"**A:** {prev_a}")
+                if prev_pid:
+                    st.caption(f"Cited passage: [{prev_pid}]")
                 st.divider()
 
         st.markdown("</div>", unsafe_allow_html=True)

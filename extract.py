@@ -31,16 +31,68 @@ FALLBACK_MODEL = os.environ.get("NOTICEGUARD_FALLBACK_MODEL") or _CFG.get("ollam
 _last_ollama_check = 0.0
 _cached_ollama_status = False
 
+_last_gemma_check = 0.0
+_cached_gemma_status = (False, None)
+
+def check_gemma4_status(
+    base_url: str = DEFAULT_OLLAMA_URL,
+    target_model: str = DEFAULT_MODEL,
+    cache_ttl: float = 2.0
+) -> Tuple[bool, Optional[str]]:
+    """
+    Lightweight health-check function that pings {base_url}/api/tags (with a 2-second timeout)
+    and checks if gemma4 (e.g., gemma4:e4b or gemma4:latest) is loaded/available.
+    Cached for cache_ttl seconds to avoid UI freezing.
+    Returns (is_connected_and_model_available, detected_model_name).
+    """
+    global _last_gemma_check, _cached_gemma_status
+    now = time.time()
+    if now - _last_gemma_check < cache_ttl:
+        return _cached_gemma_status
+
+    _last_gemma_check = now
+    try:
+        req = urllib.request.Request(f"{base_url}/api/tags", headers={"User-Agent": "NoticeGuard/1.0"})
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            if resp.status == 200:
+                body = resp.read().decode("utf-8")
+                data = json.loads(body)
+                models = data.get("models", [])
+                
+                # Check for target model or any gemma4 variant
+                target_base = target_model.split(":")[0].lower() if ":" in target_model else target_model.lower()
+                matched_model = None
+                for m in models:
+                    m_name = m.get("name", "")
+                    m_name_lower = m_name.lower()
+                    if m_name_lower == target_model.lower() or m_name_lower.startswith(f"{target_model.lower()}:"):
+                        matched_model = m_name
+                        break
+                    elif "gemma4" in m_name_lower or target_base in m_name_lower:
+                        matched_model = m_name
+
+                if matched_model:
+                    _cached_gemma_status = (True, matched_model)
+                    return _cached_gemma_status
+                else:
+                    _cached_gemma_status = (False, None)
+                    return _cached_gemma_status
+    except Exception:
+        pass
+
+    _cached_gemma_status = (False, None)
+    return _cached_gemma_status
+
 def is_ollama_available(base_url: str = DEFAULT_OLLAMA_URL) -> bool:
-    """Checks if local Ollama daemon is reachable on 127.0.0.1 (cached for 3s for performance)."""
+    """Checks if local Ollama daemon is reachable on 127.0.0.1 (cached for 2s for performance)."""
     global _last_ollama_check, _cached_ollama_status
     now = time.time()
-    if now - _last_ollama_check < 3.0:
+    if now - _last_ollama_check < 2.0:
         return _cached_ollama_status
     _last_ollama_check = now
     try:
         req = urllib.request.Request(f"{base_url}/api/tags", headers={"User-Agent": "NoticeGuard/1.0"})
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
             _cached_ollama_status = (resp.status == 200)
             return _cached_ollama_status
     except Exception:
@@ -271,6 +323,26 @@ def deterministic_fallback_extraction(text: str, passages: List[Dict[str, Any]])
     elif facts.get("is_ambiguous"):
         facts["urgency"] = "HIGH"
 
+    # 9. Human-friendly plain-language summary & practical next steps
+    amt_str = f"Rs. {facts['amount']:,}/-" if facts.get("amount") else "unspecified monetary claims"
+    sender_str = facts.get("sender") or "The sender"
+    recip_str = facts.get("recipient") or "the recipient"
+    dl_str = facts.get("deadline_raw") or "the stated deadline"
+    breach_str = facts.get("termination_breach") or "alleged default"
+
+    facts["summary"] = (
+        f"This formal notice was issued by {sender_str} addressed to {recip_str}. "
+        f"It asserts an allegation of {breach_str.lower()} and demands resolution of {amt_str}. "
+        f"The recipient is called upon to comply within {dl_str.lower()} to avert formal legal proceedings in court."
+    )
+
+    facts["recommended_next_steps"] = [
+        "Preserve the physical notice, envelope, and postal receipt as evidence of the actual delivery date.",
+        "Collate all relevant invoices, bank statements, contracts, or email records pertaining to the claim.",
+        "Avoid making unilateral admissions of liability or informal settlement payments without independent advice.",
+        "Consult a qualified advocate before the deadline expires to prepare a formal written reply."
+    ]
+
     return facts
 
 EXTRACTION_SYSTEM_PROMPT = """You are a specialized legal document triage assistant for NoticeGuard.
@@ -280,9 +352,11 @@ RULES:
 2. For EVERY extracted fact, include the EXACT verbatim quote from the text.
 3. Do NOT invent or extrapolate facts. If not stated, use null or "Unknown".
 4. Do NOT provide legal advice or verdicts.
+5. Always generate all JSON keys and values in English so that subsequent localization modules handle translation cleanly without breaking JSON formatting.
 
 SCHEMA:
 {
+  "summary": "2-3 sentence plain-language summary explaining what this notice is about",
   "sender": string,
   "sender_quote": string,
   "recipient": string,
@@ -303,6 +377,7 @@ SCHEMA:
   "financial_penalties_quote": string,
   "consequence": string,
   "consequence_quote": string,
+  "recommended_next_steps": ["practical action item 1", "practical action item 2", "practical action item 3"],
   "urgency": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW"
 }
 """
@@ -350,6 +425,13 @@ def extract_facts(
             parsed = extract_json_from_llm_response(retry_resp) if retry_resp else None
 
         if parsed and isinstance(parsed, dict) and "sender" in parsed:
+            # Ensure summary and next_steps exist
+            if not parsed.get("summary"):
+                fb = deterministic_fallback_extraction(text, passages)
+                parsed["summary"] = fb["summary"]
+            if not parsed.get("recommended_next_steps"):
+                fb = deterministic_fallback_extraction(text, passages)
+                parsed["recommended_next_steps"] = fb["recommended_next_steps"]
             return parsed
 
     # Deterministic fallback

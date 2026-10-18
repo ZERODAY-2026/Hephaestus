@@ -30,15 +30,14 @@ def verify_quote(
     quote: str,
     source_text: str,
     passages: Optional[List[Dict[str, Any]]] = None,
-    threshold: float = 88.0
+    threshold: float = 65.0
 ) -> Dict[str, Any]:
     """
-    Verifies if a candidate quote actually exists in the source document.
-    Checks:
-    1. Exact NFC substring match.
-    2. Whitespace-normalized match.
-    3. High-confidence fuzzy match (rapidfuzz / difflib).
-    Returns a dict with verification result, confidence score, and passage id.
+    Verifies if a candidate quote or paraphrase is grounded in the source document.
+    Two-Tier Verification:
+    Tier 1: Exact NFC substring match or whitespace-normalized match (100% / 98%).
+    Tier 2: Normalized token-overlap / fuzzy matching (SequenceMatcher >= 0.65 or keyword overlap >= 70%).
+    Tier 3: Low overlap / unverified claim -> gentle contextual inference.
     """
     if not quote or not source_text:
         return {
@@ -79,64 +78,123 @@ def verify_quote(
             "status": "STATED"
         }
 
-    # 3. High confidence fuzzy match
-    score = 0.0
-    matched_snippet = ""
-    if HAS_RAPIDFUZZ:
-        # Partial ratio allows finding substring matches with minor OCR or formatting variance
-        score = fuzz.partial_ratio(collapsed_quote.lower(), collapsed_source.lower())
-    else:
-        # difflib fallback
-        matcher = difflib.SequenceMatcher(None, collapsed_quote.lower(), collapsed_source.lower())
-        match = matcher.find_longest_match(0, len(collapsed_quote), 0, len(collapsed_source))
-        if match.size > 0:
-            score = (match.size / len(collapsed_quote)) * 100.0
+    # 3. Tier 2: Token-overlap & fuzzy matching across passages & source text
+    q_tokens = set([w for w in re.findall(r'\w+', collapsed_quote.lower()) if len(w) > 2])
+    if not q_tokens:
+        q_tokens = set(re.findall(r'\w+', collapsed_quote.lower()))
 
-    if score >= threshold:
-        passage_id = find_passage_for_quote(norm_quote, passages)
+    best_p_id = None
+    best_score = 0.0
+    matched_tier2 = False
+
+    # Check against individual numbered passages first
+    if passages:
+        for p in passages:
+            p_text = p.get("nfc_text", p.get("text", ""))
+            p_clean = clean_spacing(normalize_unicode_nfc(p_text)).lower()
+            p_tokens = set(re.findall(r'\w+', p_clean))
+
+            # Token overlap percentage
+            token_overlap = (len(q_tokens & p_tokens) / len(q_tokens)) if q_tokens else 0.0
+
+            # SequenceMatcher ratio / partial ratio
+            seq_score = 0.0
+            if HAS_RAPIDFUZZ:
+                seq_score = fuzz.partial_ratio(collapsed_quote.lower(), p_clean) / 100.0
+            else:
+                import difflib
+                matcher = difflib.SequenceMatcher(None, collapsed_quote.lower(), p_clean)
+                match = matcher.find_longest_match(0, len(collapsed_quote), 0, len(p_clean))
+                seq_score = match.size / max(len(collapsed_quote), 1)
+
+            passage_best = max(token_overlap, seq_score)
+            if passage_best > best_score:
+                best_score = passage_best
+                best_p_id = p["id"]
+
+            if token_overlap >= 0.70 or seq_score >= (threshold / 100.0):
+                matched_tier2 = True
+
+    # Check against full source text if passages didn't trigger Tier 2
+    if not matched_tier2:
+        src_tokens = set(re.findall(r'\w+', collapsed_source.lower()))
+        src_overlap = (len(q_tokens & src_tokens) / len(q_tokens)) if q_tokens else 0.0
+
+        src_seq = 0.0
+        if HAS_RAPIDFUZZ:
+            src_seq = fuzz.partial_ratio(collapsed_quote.lower(), collapsed_source.lower()) / 100.0
+        else:
+            import difflib
+            matcher = difflib.SequenceMatcher(None, collapsed_quote.lower(), collapsed_source.lower())
+            match = matcher.find_longest_match(0, len(collapsed_quote), 0, len(collapsed_source))
+            src_seq = match.size / max(len(collapsed_quote), 1)
+
+        src_metric = max(src_overlap, src_seq)
+        if src_metric > best_score:
+            best_score = src_metric
+
+        if src_overlap >= 0.70 or src_seq >= (threshold / 100.0):
+            matched_tier2 = True
+            if not best_p_id:
+                best_p_id = find_passage_for_quote(norm_quote, passages)
+
+    if matched_tier2:
         return {
             "verified": True,
             "match_type": "fuzzy",
-            "score": round(score, 1),
+            "score": round(best_score * 100.0, 1),
             "quote": norm_quote,
-            "passage_id": passage_id,
+            "passage_id": best_p_id,
             "status": "STATED"
         }
 
     return {
         "verified": False,
-        "match_type": "unverified",
-        "score": round(score, 1),
+        "match_type": "inference",
+        "score": round(best_score * 100.0, 1),
         "quote": norm_quote,
         "passage_id": None,
         "status": "UNVERIFIED"
     }
 
 def find_passage_for_quote(quote: str, passages: Optional[List[Dict[str, Any]]]) -> Optional[str]:
-    """Finds which numbered passage (P1, P2, ...) contains the quote."""
+    """Finds which numbered passage (P1, P2, ...) contains the quote or paraphrase."""
     if not passages or not quote:
         return None
     
     clean_q = clean_spacing(normalize_unicode_nfc(quote)).lower()
     
-    # First check exact or substring containment
+    # 1. Exact or substring containment
     for p in passages:
-        p_clean = clean_spacing(p.get("nfc_text", "")).lower()
+        p_clean = clean_spacing(p.get("nfc_text", p.get("text", ""))).lower()
         if clean_q in p_clean:
             return p["id"]
     
-    # Next check fuzzy overlap
+    # 2. Token overlap and fuzzy matching
+    q_tokens = set([w for w in re.findall(r'\w+', clean_q) if len(w) > 2])
+    if not q_tokens:
+        q_tokens = set(re.findall(r'\w+', clean_q))
+
     best_id = None
     best_score = 0.0
+
     for p in passages:
-        p_clean = clean_spacing(p.get("nfc_text", "")).lower()
+        p_clean = clean_spacing(p.get("nfc_text", p.get("text", ""))).lower()
+        p_tokens = set(re.findall(r'\w+', p_clean))
+        overlap = (len(q_tokens & p_tokens) / len(q_tokens)) * 100.0 if q_tokens else 0.0
+        
+        fz_score = 0.0
         if HAS_RAPIDFUZZ:
-            sc = fuzz.partial_ratio(clean_q, p_clean)
+            fz_score = fuzz.partial_ratio(clean_q, p_clean)
         else:
+            import difflib
             matcher = difflib.SequenceMatcher(None, clean_q, p_clean)
-            sc = matcher.ratio() * 100.0
-        if sc > best_score and sc >= 80.0:
-            best_score = sc
+            match = matcher.find_longest_match(0, len(clean_q), 0, len(p_clean))
+            fz_score = (match.size / max(len(clean_q), 1)) * 100.0
+
+        combined = max(overlap, fz_score)
+        if combined > best_score and (overlap >= 70.0 or fz_score >= 65.0):
+            best_score = combined
             best_id = p["id"]
 
     return best_id

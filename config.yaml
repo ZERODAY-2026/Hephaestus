@@ -16,7 +16,7 @@ ollama:
   temperature: 0.1
   
 verifier:
-  fuzzy_threshold: 88.0
+  fuzzy_threshold: 65.0
   max_quote_length: 500
   require_nfc: true
   strict_amounts: true
